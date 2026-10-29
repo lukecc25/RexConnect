@@ -7,7 +7,9 @@
  *
  * Copy .env.example to .env and set:
  *
- *   MAKE_WEBHOOK_URL   the Make.com custom webhook for the GroupMe scenario
+ *   MAKE_WEBHOOK_URL            the Make.com custom webhook for the GroupMe scenario
+ *   SUPABASE_URL                the Supabase project URL
+ *   SUPABASE_SERVICE_ROLE_KEY   the Supabase secret key, kept on the server
  */
 
 import crypto from "node:crypto";
@@ -17,7 +19,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const DATA_PATH = path.join(ROOT, "data", "submissions.json");
 const ENV_PATH = path.join(ROOT, ".env");
 
 const INTERESTS = new Set([
@@ -37,10 +38,6 @@ const MIME = {
   ".js": "text/javascript; charset=utf-8",
   ".ico": "image/x-icon",
   ".webp": "image/webp",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".svg": "image/svg+xml",
 };
 
 let lock = Promise.resolve();
@@ -76,25 +73,68 @@ function emptyStore() {
   return { waiting: {}, groups: [], created: {} };
 }
 
-function loadStore() {
-  if (!fs.existsSync(DATA_PATH)) return emptyStore();
-  try {
-    const data = JSON.parse(fs.readFileSync(DATA_PATH, "utf8"));
-    if (!data.waiting) data.waiting = {};
-    if (!data.groups) data.groups = [];
-    ensureCreated(data);
-    return data;
-  } catch {
-    return emptyStore();
-  }
+function normalizeStore(data) {
+  const store = data && typeof data === "object" ? data : emptyStore();
+  if (!store.waiting || typeof store.waiting !== "object" || Array.isArray(store.waiting)) store.waiting = {};
+  if (!Array.isArray(store.groups)) store.groups = [];
+  ensureCreated(store);
+  return store;
 }
 
-function saveStore(store) {
-  fs.mkdirSync(path.dirname(DATA_PATH), { recursive: true });
-  const temporary = DATA_PATH.replace(/\.json$/, ".tmp");
-  fs.writeFileSync(temporary, JSON.stringify(store, null, 2));
-  fs.rmSync(DATA_PATH, { force: true });
-  fs.renameSync(temporary, DATA_PATH);
+function supabaseConfig() {
+  const url = String(process.env.SUPABASE_URL || "").trim().replace(/\/+$/, "").replace(/\/rest\/v1$/, "");
+  const key = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+  if (!url || !key) return null;
+  return { url, key };
+}
+
+function supabaseHeaders(key, extra = {}) {
+  return {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    "Content-Type": "application/json",
+    ...extra,
+  };
+}
+
+async function loadStore() {
+  const config = supabaseConfig();
+  if (!config) throw new Error("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.");
+
+  const response = await fetch(`${config.url}/rest/v1/rex_store?id=eq.1&select=data`, {
+    headers: supabaseHeaders(config.key),
+  });
+  if (response.status === 404) {
+    throw new Error("Supabase is missing the rex_store table. Run supabase/schema.sql in the Supabase SQL editor.");
+  }
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 180);
+    throw new Error(`Could not load signups from Supabase (${response.status}). ${detail}`);
+  }
+  const rows = await response.json();
+  if (!rows.length) return emptyStore();
+  return normalizeStore(rows[0].data);
+}
+
+async function saveStore(store) {
+  const config = supabaseConfig();
+  if (!config) throw new Error("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.");
+
+  const response = await fetch(`${config.url}/rest/v1/rex_store?on_conflict=id`, {
+    method: "POST",
+    headers: supabaseHeaders(config.key, {
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    }),
+    body: JSON.stringify({
+      id: 1,
+      data: store,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 180);
+    throw new Error(`Could not save signups to Supabase (${response.status}). ${detail}`);
+  }
 }
 
 function ensureCreated(store) {
@@ -113,13 +153,9 @@ function ensureCreated(store) {
 
 function createdCounts(store) {
   ensureCreated(store);
-  const counts = {};
   let total = 0;
-  for (const interest of INTERESTS) {
-    counts[interest] = store.created[interest];
-    total += store.created[interest];
-  }
-  return { counts, total };
+  for (const interest of INTERESTS) total += store.created[interest];
+  return { total };
 }
 
 function prune(store, now) {
@@ -154,10 +190,9 @@ function recordSubmission(store, contact, interest, now) {
 
   if (!store.waiting[interest]) store.waiting[interest] = [];
   const pool = store.waiting[interest];
-  if (pool.some((person) => sameContact(person, contact))) {
+    if (pool.some((person) => sameContact(person, contact))) {
     const result = waitingResult(interest, pool.length);
     result.alreadyWaiting = true;
-    result.contact = contact.email ? "email" : "phone";
     return [result, []];
   }
 
@@ -182,7 +217,6 @@ function recordSubmission(store, contact, interest, now) {
         phone: person.phone || null,
         email: person.email || null,
       })),
-      phones: members.map((person) => person.phone).filter(Boolean),
       createdAt: now,
       textStatus: "pending",
       groupmeId: null,
@@ -205,16 +239,13 @@ function recordSubmission(store, contact, interest, now) {
           size: group.members.length,
           textStatus: group.textStatus,
           groupId: group.id,
-          contact: contact.email ? "email" : "phone",
         },
         formed,
       ];
     }
   }
 
-  const result = waitingResult(interest, pool.length);
-  result.contact = contact.email ? "email" : "phone";
-  return [result, formed];
+  return [waitingResult(interest, pool.length), formed];
 }
 
 function makeWebhookUrl() {
@@ -247,7 +278,7 @@ function welcomeMessage(interest, size) {
 }
 
 function groupMePayload(group) {
-  const people = group.members || (group.phones || []).map((phone) => ({ phone, email: null }));
+  const people = group.members || [];
   const size = people.length;
   return {
     groupId: group.id,
@@ -444,9 +475,9 @@ async function submit(req, res) {
 
   const contact = { phone: phone || null, email };
   const { result, formed } = await withLock(async () => {
-    const store = loadStore();
+    const store = await loadStore();
     const [nextResult, nextFormed] = recordSubmission(store, contact, interest, Date.now() / 1000);
-    saveStore(store);
+    await saveStore(store);
     return { result: nextResult, formed: nextFormed };
   });
 
@@ -456,7 +487,7 @@ async function submit(req, res) {
 
   if (formed.length) {
     await withLock(async () => {
-      const store = loadStore();
+      const store = await loadStore();
       const byId = new Map(formed.map((group) => [group.id, group]));
       for (const group of store.groups) {
         const update = byId.get(group.id);
@@ -466,7 +497,7 @@ async function submit(req, res) {
         group.groupmeId = update.groupmeId;
         group.groupmeUrl = update.groupmeUrl;
       }
-      saveStore(store);
+      await saveStore(store);
     });
     if (result.status === "grouped") {
       const match = formed.find((group) => group.id === result.groupId);
@@ -488,7 +519,7 @@ async function handle(req, res) {
       return;
     }
     if ((req.method === "GET" || req.method === "HEAD") && pathname === "/api/counts") {
-      const counts = await withLock(async () => createdCounts(loadStore()));
+      const counts = await withLock(async () => createdCounts(await loadStore()));
       if (req.method === "HEAD") {
         res.writeHead(200, { "Cache-Control": "no-store" });
         res.end();
@@ -531,11 +562,11 @@ async function handle(req, res) {
 async function main() {
   loadEnv(ENV_PATH);
   await withLock(async () => {
-    const store = loadStore();
+    const store = await loadStore();
     prune(store, Date.now() / 1000);
-    saveStore(store);
+    await saveStore(store);
     await retryUnsent(store);
-    saveStore(store);
+    await saveStore(store);
   });
 
   const server = http.createServer(handle);
