@@ -569,9 +569,10 @@ async function main() {
     await saveStore(store);
   });
 
+  const port = Number(process.env.PORT) || 8765;
   const server = http.createServer(handle);
-  server.listen(8765, "127.0.0.1", () => {
-    console.log("Rex Connect is running at http://127.0.0.1:8765/");
+  server.listen(port, "0.0.0.0", () => {
+    console.log(`Rex Connect is running on port ${port}`);
   });
 }
 
