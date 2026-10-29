@@ -1,15 +1,13 @@
 /**
  * Rex Connect server.
  *
- * Serves the site and temporarily stores submitted phone numbers.
- * When 4 to 6 people have chosen the same group, it opens a group text
- * so they can talk to each other.
+ * Serves the site and keeps submitted phone numbers until they join a GroupMe.
+ * When 4 to 6 people have chosen the same group, it asks Make.com to
+ * create a unique GroupMe for them.
  *
- * Texting uses Twilio Conversations. Copy .env.example to .env and set:
+ * Copy .env.example to .env and set:
  *
- *   TWILIO_ACCOUNT_SID
- *   TWILIO_AUTH_TOKEN
- *   TWILIO_PHONE_NUMBER   a +1 long code, for example +15015550100
+ *   MAKE_WEBHOOK_URL   the Make.com custom webhook for the GroupMe scenario
  */
 
 import crypto from "node:crypto";
@@ -31,7 +29,6 @@ const INTERESTS = new Set([
 ]);
 const GROUP_MIN = 4;
 const GROUP_MAX = 6;
-const WAITING_SECONDS = 48 * 60 * 60;
 const GROUP_SECONDS = 7 * 24 * 60 * 60;
 
 const MIME = {
@@ -76,7 +73,7 @@ function loadEnv(filePath) {
 }
 
 function emptyStore() {
-  return { waiting: {}, groups: [] };
+  return { waiting: {}, groups: [], created: {} };
 }
 
 function loadStore() {
@@ -85,6 +82,7 @@ function loadStore() {
     const data = JSON.parse(fs.readFileSync(DATA_PATH, "utf8"));
     if (!data.waiting) data.waiting = {};
     if (!data.groups) data.groups = [];
+    ensureCreated(data);
     return data;
   } catch {
     return emptyStore();
@@ -99,12 +97,32 @@ function saveStore(store) {
   fs.renameSync(temporary, DATA_PATH);
 }
 
-function prune(store, now) {
-  for (const [interest, people] of Object.entries(store.waiting)) {
-    const kept = people.filter((person) => now - person.at < WAITING_SECONDS);
-    if (kept.length) store.waiting[interest] = kept;
-    else delete store.waiting[interest];
+function ensureCreated(store) {
+  if (!store.created || typeof store.created !== "object" || Array.isArray(store.created)) {
+    store.created = {};
+    for (const group of store.groups) {
+      if (!INTERESTS.has(group.interest)) continue;
+      store.created[group.interest] = (store.created[group.interest] || 0) + 1;
+    }
   }
+  for (const interest of INTERESTS) {
+    const count = Number(store.created[interest]);
+    store.created[interest] = Number.isInteger(count) && count > 0 ? count : 0;
+  }
+}
+
+function createdCounts(store) {
+  ensureCreated(store);
+  const counts = {};
+  let total = 0;
+  for (const interest of INTERESTS) {
+    counts[interest] = store.created[interest];
+    total += store.created[interest];
+  }
+  return { counts, total };
+}
+
+function prune(store, now) {
   store.groups = store.groups.filter((group) => now - group.createdAt < GROUP_SECONDS);
 }
 
@@ -124,24 +142,35 @@ function waitingResult(interest, count) {
   };
 }
 
-function recordSubmission(store, phone, interest, now) {
+function sameContact(person, contact) {
+  if (contact.phone && person.phone === contact.phone) return true;
+  return Boolean(contact.email && person.email && person.email.toLowerCase() === contact.email);
+}
+
+function recordSubmission(store, contact, interest, now) {
   prune(store, now);
   compactWaiting(store);
+  ensureCreated(store);
 
   if (!store.waiting[interest]) store.waiting[interest] = [];
   const pool = store.waiting[interest];
-  if (pool.some((person) => person.phone === phone)) {
+  if (pool.some((person) => sameContact(person, contact))) {
     const result = waitingResult(interest, pool.length);
     result.alreadyWaiting = true;
+    result.contact = contact.email ? "email" : "phone";
     return [result, []];
   }
 
   for (const [other, people] of Object.entries(store.waiting)) {
     if (other === interest) continue;
-    store.waiting[other] = people.filter((person) => person.phone !== phone);
+    store.waiting[other] = people.filter((person) => !sameContact(person, contact));
   }
 
-  pool.push({ phone, at: now });
+  pool.push({
+    phone: contact.phone || null,
+    email: contact.email || null,
+    at: now,
+  });
   const formed = [];
   while (pool.length >= GROUP_MIN) {
     const size = Math.min(GROUP_MAX, pool.length);
@@ -149,142 +178,147 @@ function recordSubmission(store, phone, interest, now) {
     const group = {
       id: crypto.randomBytes(16).toString("hex"),
       interest,
-      phones: members.map((person) => person.phone),
+      members: members.map((person) => ({
+        phone: person.phone || null,
+        email: person.email || null,
+      })),
+      phones: members.map((person) => person.phone).filter(Boolean),
       createdAt: now,
       textStatus: "pending",
-      conversationSid: null,
+      groupmeId: null,
+      groupmeUrl: null,
       textError: null,
     };
     store.groups.push(group);
     formed.push(group);
+    store.created[interest] += 1;
   }
 
   compactWaiting(store);
 
   for (const group of formed) {
-    if (group.phones.includes(phone)) {
+    if (group.members.some((person) => sameContact(person, contact))) {
       return [
         {
           status: "grouped",
           interest,
-          size: group.phones.length,
+          size: group.members.length,
           textStatus: group.textStatus,
           groupId: group.id,
+          contact: contact.email ? "email" : "phone",
         },
         formed,
       ];
     }
   }
 
-  return [waitingResult(interest, pool.length), formed];
+  const result = waitingResult(interest, pool.length);
+  result.contact = contact.email ? "email" : "phone";
+  return [result, formed];
 }
 
-function twilioConfigured() {
-  return Boolean(
-    process.env.TWILIO_ACCOUNT_SID &&
-      process.env.TWILIO_AUTH_TOKEN &&
-      process.env.TWILIO_PHONE_NUMBER,
-  );
+function makeWebhookUrl() {
+  const raw = process.env.MAKE_WEBHOOK_URL;
+  if (!raw) return null;
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase();
+  const allowed = host === "make.com" || host.endsWith(".make.com") || host.endsWith(".integromat.com");
+  if (url.protocol !== "https:" || !allowed) return null;
+  return url.toString();
 }
 
-function quotePlus(value) {
-  return encodeURIComponent(value)
-    .replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)
-    .replace(/%20/g, "+");
+const GROUP_PURPOSE = {
+  "School Activities": "school activities",
+  "Game Nights": "game nights",
+  Events: "events",
+  "Fitness Programs": "fitness",
+  Sports: "sports",
+};
+
+function welcomeMessage(interest, size) {
+  const purpose = GROUP_PURPOSE[interest] || String(interest).toLowerCase();
+  const joined = size === 1 ? "1 person joined" : `${size} people joined`;
+  return `Welcome to Rex Connect. ${joined} this chat for ${purpose}. Talk about what you want to try doing and hang out with each other.`;
 }
 
-function formEncode(fields) {
-  return fields.map(([key, value]) => `${quotePlus(key)}=${quotePlus(String(value))}`).join("&");
-}
-
-async function twilioRequest(method, url, fields) {
-  const headers = {
-    Authorization: `Basic ${Buffer.from(
-      `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`,
-    ).toString("base64")}`,
+function groupMePayload(group) {
+  const people = group.members || (group.phones || []).map((phone) => ({ phone, email: null }));
+  const size = people.length;
+  return {
+    groupId: group.id,
+    name: `Rex Connect: ${group.interest} ${group.id.slice(0, 6)}`,
+    interest: group.interest,
+    size,
+    phones: people.filter((person) => person.phone).map((person) => `+1${person.phone}`),
+    emails: people.filter((person) => person.email).map((person) => person.email),
+    members: people.map((person) => ({
+      nickname: "Rex Connect",
+      phone: person.phone ? `+1${person.phone}` : "",
+      email: person.email || "",
+    })),
+    description:
+      `Thank you for using Rex Connect. Here is your group of ${size} people. ` +
+      "Try talking about what you want to try doing and hang out with each other.",
+    message: welcomeMessage(group.interest, size),
   };
-  const init = { method, headers, signal: AbortSignal.timeout(20000) };
-  if (fields) {
-    headers["Content-Type"] = "application/x-www-form-urlencoded";
-    init.body = formEncode(fields);
-  }
-  const response = await fetch(url, init);
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`Twilio returned ${response.status}: ${text.slice(0, 300)}`);
-  }
-  return JSON.parse(text);
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function readGroupMeLink(body) {
+  if (!body || typeof body !== "object") return {};
+  const rawUrl = body.groupmeUrl || body.shareUrl || body.share_url || body.groupme_url;
+  const rawId = body.groupmeId || body.group_id || body.id;
+  let groupmeUrl = null;
+  if (typeof rawUrl === "string") {
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.protocol === "https:") groupmeUrl = parsed.toString();
+    } catch {
+      groupmeUrl = null;
+    }
+  }
+  return { groupmeUrl, groupmeId: rawId ? String(rawId) : null };
 }
 
-async function sendGroupText(group) {
-  if (!twilioConfigured()) {
+async function createGroupMe(group) {
+  const webhook = makeWebhookUrl();
+  if (!webhook) {
     group.textStatus = "unconfigured";
-    group.textError = "Twilio credentials are not set.";
+    group.textError = "Make.com webhook is not set.";
     return;
   }
 
-  const fromNumber = process.env.TWILIO_PHONE_NUMBER;
-  const fields = [["FriendlyName", `Rex Connect: ${group.interest}`]];
-  fields.push([
-    "Participant",
-    JSON.stringify({
-      identity: "rex-connect",
-      messaging_binding: { projected_address: fromNumber },
-    }),
-  ]);
-  for (const phone of group.phones) {
-    fields.push([
-      "Participant",
-      JSON.stringify({ messaging_binding: { address: `+1${phone}` } }),
-    ]);
-  }
-
   try {
-    const created = await twilioRequest(
-      "POST",
-      "https://conversations.twilio.com/v1/ConversationWithParticipants",
-      fields,
-    );
-    const sid = created.sid;
-    group.conversationSid = sid;
-    const deadline = Date.now() + 15000;
-    let state = created.state;
-    while (state === "initializing" && Date.now() < deadline) {
-      await sleep(1000);
-      const current = await twilioRequest(
-        "GET",
-        `https://conversations.twilio.com/v1/Conversations/${sid}`,
-      );
-      state = current.state;
+    const headers = { "Content-Type": "application/json" };
+    if (process.env.MAKE_WEBHOOK_SECRET) headers["x-rex-secret"] = process.env.MAKE_WEBHOOK_SECRET;
+    const response = await fetch(webhook, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(groupMePayload(group)),
+      redirect: "error",
+      signal: AbortSignal.timeout(20000),
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`Make.com returned ${response.status}`);
+    let body = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = null;
     }
-    if (state === "closed") {
-      throw new Error("Twilio closed the group before it became active.");
-    }
-
-    const size = group.phones.length;
-    const others = size - 1;
-    const noun = others === 1 ? "person" : "people";
-    await twilioRequest(
-      "POST",
-      `https://conversations.twilio.com/v1/Conversations/${sid}/Messages`,
-      [
-        [
-          "Body",
-          `Rex Connect: your ${group.interest} group is ready. You're here with ${others} other ${noun} who chose the same group. Reply in this text to introduce yourself and make plans. Thank you for using Rex Connect. Here is your group of ${size} people. Try talking about what you want to try doing and hang out with each other.`,
-        ],
-        ["Author", "rex-connect"],
-      ],
-    );
+    const link = readGroupMeLink(body);
+    group.groupmeId = link.groupmeId;
+    group.groupmeUrl = link.groupmeUrl;
     group.textStatus = "sent";
     group.textError = null;
   } catch (error) {
     group.textStatus = "failed";
     group.textError = String(error.message || error);
-    console.log(`Group text failed for ${group.interest}: ${group.textError}`);
+    console.log(`GroupMe creation failed for ${group.interest}: ${group.textError}`);
   }
 }
 
@@ -301,17 +335,18 @@ function publicResult(result) {
   } else {
     payload.size = result.size;
     payload.textStatus = result.textStatus;
+    if (result.groupmeUrl) payload.groupmeUrl = result.groupmeUrl;
   }
   return payload;
 }
 
 async function retryUnsent(store) {
-  if (!twilioConfigured()) return;
+  if (!makeWebhookUrl()) return;
   const pending = store.groups.filter((group) =>
     group.textStatus === "pending" || group.textStatus === "unconfigured",
   );
   for (const group of pending) {
-    await sendGroupText(group);
+    await createGroupMe(group);
   }
 }
 
@@ -368,20 +403,26 @@ function sendFile(res, filePath) {
 async function readBody(req) {
   const length = Number(req.headers["content-length"] || 0);
   if (!Number.isInteger(length) || length <= 0 || length > 2000) {
-    return { error: "Enter a 10-digit phone number." };
+    return { error: "Choose a group and enter a phone number or email." };
   }
   const chunks = [];
   let received = 0;
   for await (const chunk of req) {
     received += chunk.length;
-    if (received > 2000) return { error: "Enter a 10-digit phone number." };
+    if (received > 2000) return { error: "Choose a group and enter a phone number or email." };
     chunks.push(chunk);
   }
   try {
     return { payload: JSON.parse(Buffer.concat(chunks).toString("utf8")) };
   } catch {
-    return { error: "Enter a 10-digit phone number." };
+    return { error: "Choose a group and enter a phone number or email." };
   }
+}
+
+function normalizeEmail(value) {
+  const email = String(value ?? "").trim().toLowerCase();
+  if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return null;
+  return email;
 }
 
 async function submit(req, res) {
@@ -393,21 +434,24 @@ async function submit(req, res) {
 
   let phone = String(body.payload.phone ?? "").replace(/\D/g, "");
   if (phone.length === 11 && phone.startsWith("1")) phone = phone.slice(1);
+  if (phone.length !== 10) phone = "";
+  const email = normalizeEmail(body.payload.email);
   const interest = String(body.payload.interest ?? "");
-  if (phone.length !== 10 || !INTERESTS.has(interest)) {
-    sendJson(res, 400, { error: "Choose a group and enter a 10-digit phone number." });
+  if ((!phone && !email) || (phone && email) || !INTERESTS.has(interest)) {
+    sendJson(res, 400, { error: "Choose a group and enter a phone number or email." });
     return;
   }
 
+  const contact = { phone: phone || null, email };
   const { result, formed } = await withLock(async () => {
     const store = loadStore();
-    const [nextResult, nextFormed] = recordSubmission(store, phone, interest, Date.now() / 1000);
+    const [nextResult, nextFormed] = recordSubmission(store, contact, interest, Date.now() / 1000);
     saveStore(store);
     return { result: nextResult, formed: nextFormed };
   });
 
   for (const group of formed) {
-    await sendGroupText(group);
+    await createGroupMe(group);
   }
 
   if (formed.length) {
@@ -419,13 +463,17 @@ async function submit(req, res) {
         if (!update) continue;
         group.textStatus = update.textStatus;
         group.textError = update.textError;
-        group.conversationSid = update.conversationSid;
+        group.groupmeId = update.groupmeId;
+        group.groupmeUrl = update.groupmeUrl;
       }
       saveStore(store);
     });
     if (result.status === "grouped") {
       const match = formed.find((group) => group.id === result.groupId);
-      if (match) result.textStatus = match.textStatus;
+      if (match) {
+        result.textStatus = match.textStatus;
+        result.groupmeUrl = match.groupmeUrl;
+      }
     }
   }
 
@@ -437,6 +485,16 @@ async function handle(req, res) {
     const pathname = requestPath(req.url || "/");
     if (req.method === "POST" && pathname === "/api/submit") {
       await submit(req, res);
+      return;
+    }
+    if ((req.method === "GET" || req.method === "HEAD") && pathname === "/api/counts") {
+      const counts = await withLock(async () => createdCounts(loadStore()));
+      if (req.method === "HEAD") {
+        res.writeHead(200, { "Cache-Control": "no-store" });
+        res.end();
+        return;
+      }
+      sendJson(res, 200, counts);
       return;
     }
     if (req.method === "POST") {
@@ -491,4 +549,4 @@ const launchedDirectly =
 
 if (launchedDirectly) main();
 
-export { emptyStore, recordSubmission };
+export { createGroupMe, emptyStore, groupMePayload, recordSubmission };

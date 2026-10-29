@@ -135,8 +135,7 @@ button {
   gap: 12px;
   color: var(--blue);
   font-family: var(--font-regular);
-  font-weight: 700;
-  -webkit-text-stroke: 0.35px currentColor;
+  font-weight: 30;
   font-size: 32px;
   padding: 4px 8px 8px;
 }
@@ -274,6 +273,16 @@ button {
   letter-spacing: -0.02em;
 }
 
+.group-total {
+  display: block;
+  margin-top: 12px;
+  color: var(--blue);
+  font-family: var(--font-title);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0;
+}
+
 .radio {
   width: 30px;
   height: 30px;
@@ -351,6 +360,29 @@ button {
 
 #phone-form .btn.is-ready:hover {
   background: var(--blue-hover);
+}
+
+.contact-choice {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.contact-option {
+  border: 0;
+  border-radius: 999px;
+  background: var(--input);
+  color: var(--text);
+  font-family: var(--font-title);
+  font-weight: 600;
+  font-size: 15px;
+  padding: 10px 12px;
+}
+
+.contact-option.is-selected {
+  background: var(--blue);
+  color: var(--white);
 }
 
 .form-error {

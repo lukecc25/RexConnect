@@ -18,7 +18,8 @@
             <article class="card intro">
                 <p class="step">Step 1 of 2</p>
                 <h2 id="groups-title" tabindex="-1">Choose your group</h2>
-                <p class="lede">Pick the community you want to join first. We'll use this to match you with the right people before you share your number.</p>
+                <p class="lede">Pick the community you want to join first. We'll use this to match you with the right people before you share a phone number or email.</p>
+                <p class="group-total" id="group-total">0 groups created</p>
             </article>
 
             <form id="group-form">
@@ -124,18 +125,31 @@
                     </svg>
                     Step 2 of 2
                 </p>
-                <h2 id="phone-title" tabindex="-1">Stay connected by text</h2>
-                <p class="lede">Share your phone number to connect with your community.</p>
+                <h2 id="phone-title" tabindex="-1">Stay connected on GroupMe</h2>
+                <p class="lede">Share a phone number or email so we can add you to a GroupMe with people who chose the same group.</p>
             </div>
 
             <form id="phone-form" class="card">
-                <label class="field">
+                <div class="contact-choice" role="group" aria-label="How should we add you">
+                    <button class="contact-option is-selected" type="button" data-contact="phone" aria-pressed="true">Phone</button>
+                    <button class="contact-option" type="button" data-contact="email" aria-pressed="false">Email</button>
+                </div>
+                <label class="field" id="phone-field">
                     <span class="field-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.35 1.9.67 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.32 1.85.54 2.81.67A2 2 0 0 1 22 16.92z"/>
                         </svg>
                     </span>
                     <input id="phone-input" type="tel" inputmode="numeric" autocomplete="tel" placeholder="(000) 000 - 0000" aria-label="Phone number">
+                </label>
+                <label class="field" id="email-field" hidden>
+                    <span class="field-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="5" width="18" height="14" rx="2"/>
+                            <path d="m3 7 9 6 9-6"/>
+                        </svg>
+                    </span>
+                    <input id="email-input" type="email" autocomplete="email" placeholder="name@email.com" aria-label="Email">
                 </label>
                 <button class="btn" id="submit-phone" type="submit" disabled>Submit</button>
                 <p class="form-error" id="phone-error" hidden></p>
@@ -148,9 +162,9 @@
                         <path d="M12 11v6M12 8h.01"/>
                     </svg>
                 </span>
-                <p class="why-label">Why we want your number</p>
-                <h3>Form a message group</h3>
-                <p class="why-copy">We use your number to bring 4-6 people together in a message group and help our community grow closer.</p>
+                <p class="why-label">Why we ask</p>
+                <h3>Form a GroupMe</h3>
+                <p class="why-copy">We use your phone number or email to add you to a GroupMe with 4-6 people who chose the same group.</p>
             </article>
 
             <article class="card next-card">
@@ -163,7 +177,7 @@
                             <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
                         </svg>
                     </span>
-                    <p>Once 4-6 people have submitted their numbers, we'll create a message group. This may take some time.</p>
+                    <p>Once 4-6 people have shared a phone number or email, we'll create a GroupMe for them. This may take some time.</p>
                 </div>
                 <div class="bullet">
                     <span class="bullet-icon" aria-hidden="true">
@@ -171,7 +185,7 @@
                             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
                         </svg>
                     </span>
-                    <p>Look out for a text message when your group is ready. No need to stay on this screen.</p>
+                    <p>You'll be added to that GroupMe. No need to stay on this screen.</p>
                 </div>
             </article>
 
@@ -226,7 +240,7 @@
                             <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
                         </svg>
                     </span>
-                    <p>Once 4-6 people have submitted their numbers, we'll create a message group. This may take some time.</p>
+                    <p>Once 4-6 people have shared a phone number or email, we'll create a GroupMe for them. This may take some time.</p>
                 </div>
                 <div class="bullet">
                     <span class="bullet-icon" aria-hidden="true">
@@ -234,7 +248,7 @@
                             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
                         </svg>
                     </span>
-                    <p>Look out for a text message when your group is ready. No need to stay on this screen.</p>
+                    <p>You'll be added to that GroupMe. No need to stay on this screen.</p>
                 </div>
             </div>
 
