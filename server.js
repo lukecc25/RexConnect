@@ -572,7 +572,8 @@ async function main() {
   const port = Number(process.env.PORT) || 8765;
   const server = http.createServer(handle);
   server.listen(port, "0.0.0.0", () => {
-    console.log(`Rex Connect is running on port ${port}`);
+    const url = process.env.RENDER_EXTERNAL_URL || `http://127.0.0.1:${port}/`;
+    console.log(`Rex Connect is running at ${url}`);
   });
 }
 
